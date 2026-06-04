@@ -1,0 +1,695 @@
+---
+title: "Laporan Analisis Klaster"
+subtitle: "Dataset Absenteeism at Work"
+author: ""
+date: "`r Sys.Date()`"
+always_allow_html: true
+output:
+  word_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_width: 7
+    fig_height: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center"
+)
+```
+
+---
+
+# Deskripsi dan Karakteristik Dataset
+
+Analisis ini menggunakan dataset **Absenteeism at Work** yang mencakup data ketidakhadiran karyawan di tempat kerja beserta berbagai atribut demografis, kesehatan, dan perilaku. Dataset ini memuat **740 baris observasi** dan **21 kolom variabel**.
+
+Fokus analisis klasterisasi dipusatkan pada **6 variabel numerik kontinu** yang merepresentasikan karakteristik personal dan pekerjaan karyawan, yaitu:
+
+- **Transportation expense**: Biaya transportasi harian karyawan (dalam satuan mata uang).
+- **Distance from Residence to Work**: Jarak tempat tinggal ke tempat kerja (dalam km).
+- **Age**: Usia karyawan (dalam tahun).
+- **Work load Average/day**: Rata-rata beban kerja per hari.
+- **Body mass index**: Indeks massa tubuh karyawan.
+- **Absenteeism time in hours**: Total jam ketidakhadiran karyawan.
+
+Variabel lainnya seperti `ID`, `Reason for absence`, `Month of absence`, `Day of the week`, dan variabel kategoris biner (Disciplinary failure, Social drinker, Social smoker) tidak dilibatkan dalam proses pemodelan klasterisasi karena bersifat kategoris atau merupakan pengenal observasi. Karakteristik utama dari data karyawan ini adalah adanya distribusi yang tidak simetris, terutama pada variabel `Absenteeism time in hours` yang memiliki nilai ekstrem (outliers) cukup masif.
+
+---
+
+# Data Preprocessing
+
+## Load Library
+
+Langkah awal adalah mengaktifkan seluruh pustaka R yang diperlukan untuk manipulasi data, ringkasan statistika deskriptif, penentuan parameter, pengeksekusian 3 algoritma klasterisasi (K-Means, Hierarchical/AGNES, dan DBSCAN), serta kebutuhan visualisasi grafik.
+
+```{r load-library}
+library(readxl)
+library(tidyverse)
+library(cluster)
+library(factoextra)
+library(dbscan)
+library(knitr)
+library(kableExtra)
+library(corrplot)
+library(gridExtra)
+```
+
+## Impor Data dan Pengecekan Missing Value
+
+Data diimpor dari berkas Excel lokal. Sebelum melakukan analisis lebih mendalam, dimensi matriks diperiksa untuk memastikan keutuhan data (740 baris, 21 kolom) serta dilakukan pemindaian nilai kosong (*missing values*) untuk menjamin kelancaran komputasi algoritma.
+
+```{r import-data}
+absen <- read_excel("D:/STATISTIKA UNTIRTA/Statistical Mechine Learning/Absenteeism_at_work.xlsx")
+
+cat("Dimensi Dataset:\n")
+print(dim(absen))
+
+cat("\nPengecekan Missing Values pada Tiap Kolom:\n")
+print(colSums(is.na(absen)))
+```
+
+Tidak ditemukan adanya data yang kosong atau hilang (*missing values*) pada setiap kolom di dalam dataset Absenteeism at Work. Seluruh 740 baris data terisi secara utuh, sehingga dataset ini sudah bersih dan siap untuk langsung digunakan dalam proses transformasi (*scaling*) dan pemodelan klasterisasi tanpa perlu melakukan imputasi data.
+
+## Pemilihan Variabel dan Scaling
+
+Dilakukan proses *slicing* untuk mengisolasi 6 variabel numerik yang akan digunakan dalam klasterisasi. Karena rentang nilai antar-variabel memiliki perbedaan skala yang sangat jauh (misalnya `Work load Average/day` berkisar ratusan ribu sementara `Age` hanya puluhan), transformasi standardisasi menggunakan **Z-score** mutlak diterapkan agar seluruh variabel memiliki bobot rentang yang seragam (Mean = 0, SD = 1) sebelum dihitung jarak geometrisnya.
+
+```{r preprocessing}
+# Pemilihan variabel untuk klasterisasi
+cluster_vars <- c("Transportation expense",
+                  "Distance from Residence to Work",
+                  "Age",
+                  "Work load Average/day",
+                  "Body mass index",
+                  "Absenteeism time in hours")
+
+data_cluster <- absen %>% select(all_of(cluster_vars))
+
+# Rename kolom agar lebih ringkas
+colnames(data_cluster) <- c("Transport_Exp", "Distance", "Age",
+                             "Workload", "BMI", "Absenteeism_Hours")
+
+# Standardisasi Z-score
+data_scaled <- data_cluster %>% scale() %>% as_tibble()
+
+# Matriks jarak Euclidean
+jarak_matriks <- dist(data_scaled, method = "euclidean")
+
+cat("Dimensi data setelah seleksi variabel:", dim(data_cluster), "\n")
+cat("\nRingkasan data setelah scaling:\n")
+print(summary(data_scaled))
+```
+
+---
+
+# Exploratory Data Analysis
+
+Langkah ini bertujuan untuk memahami distribusi sebaran data asli. Melalui tabel deskriptif, nilai rata-rata dan kecondongan (*skewness*) dapat dipantau, sementara grafik boxplot dan histogram digunakan untuk mengidentifikasi keberadaan pencilan (*outlier*) pada setiap variabel.
+
+## Statistik Deskriptif
+
+```{r deskriptif}
+# Fungsi hitung skewness manual
+skewness_val <- function(x) {
+  n <- length(x)
+  m <- mean(x, na.rm = TRUE)
+  s <- sd(x, na.rm = TRUE)
+  sum((x - m)^3, na.rm = TRUE) / ((n - 1) * s^3)
+}
+
+stat_tabel <- data_cluster %>%
+  summarise(across(everything(), list(
+    Mean     = ~round(mean(.x, na.rm = TRUE), 3),
+    Std.Dev  = ~round(sd(.x, na.rm = TRUE), 3),
+    Min      = ~round(min(.x, na.rm = TRUE), 3),
+    Q1       = ~round(quantile(.x, 0.25, na.rm = TRUE), 3),
+    Median   = ~round(median(.x, na.rm = TRUE), 3),
+    Q3       = ~round(quantile(.x, 0.75, na.rm = TRUE), 3),
+    Max      = ~round(max(.x, na.rm = TRUE), 3),
+    Skewness = ~round(skewness_val(.x), 3)
+  ))) %>%
+  pivot_longer(everything(),
+               names_to = c("Variabel", ".value"),
+               names_sep = "_(?=[^_]+$)") %>%
+  rename(Std.Dev = `Std.Dev`)
+
+kable(stat_tabel,
+      format       = "simple",
+      caption      = "Ringkasan Statistik Deskriptif Data Absenteeism at Work",
+      align        = "lrrrrrrrrr") %>%
+  kable_styling(
+)
+```
+
+Berdasarkan output statistika deskriptif terhadap 740 data karyawan, diperoleh karakteristik data sebagai berikut:
+
+- **Timpangnya Skala Variabel**: Nilai `Workload` rata-rata mencapai lebih dari 200.000 satuan, jauh lebih besar dibandingkan variabel lainnya. Hal ini menjadi bukti nyata bahwa *scaling* mutlak diperlukan.
+- **Variabilitas Tinggi**: Variabel `Absenteeism_Hours` memiliki standar deviasi yang hampir dua kali lipat nilai rata-ratanya, menandakan variasi yang sangat lebar antar-karyawan.
+- **Distribusi Menjulur Kanan**: Nilai *Mean* pada variabel `Absenteeism_Hours` jauh lebih besar dari Median, didukung nilai Skewness positif yang tinggi. Ini menunjukkan mayoritas karyawan memiliki jam absen yang kecil, namun ada segelintir karyawan dengan jam absen sangat tinggi (*outliers*).
+
+## Visualisasi Distribusi
+
+```{r visualisasi-boxplot, fig.cap="Distribusi Variabel Klasterisasi (Data Original)"}
+par(mar = c(7, 5, 4, 2) + 0.1)
+boxplot(data_cluster,
+        main   = "Distribusi Variabel Klasterisasi (Data Original)",
+        col    = "steelblue3",
+        las    = 2,
+        ylab   = "Nilai",
+        names  = c("Transport", "Distance", "Age", "Workload", "BMI", "Absen Hours"))
+```
+
+```{r visualisasi-histogram, fig.cap="Histogram Distribusi Tiap Variabel"}
+var_names <- colnames(data_cluster)
+
+par(mfrow = c(2, 3), mar = c(4, 4, 3, 1))
+for (var in var_names) {
+  hist(data_cluster[[var]],
+       main   = var,
+       xlab   = "Nilai",
+       col    = "steelblue3",
+       border = "white",
+       breaks = 30)
+}
+par(mfrow = c(1, 1))
+```
+
+Berdasarkan visualisasi grafik boxplot dan histogram:
+
+- Grafik *boxplot* menunjukkan adanya **pencilan masif** terutama pada variabel `Absenteeism_Hours` (melebihi 100 jam) dan `Distance`. Keberadaan pencilan ekstrem ini menjadi motivasi untuk menggunakan **DBSCAN** yang secara inheren mampu mendeteksi dan mengklasifikasikan *noise* (outlier) sebagai titik yang tidak masuk klaster manapun.
+- Grafik histogram mengonfirmasi bahwa hampir semua variabel memiliki **distribusi menjulur positif** (*right-skewed*), paling tajam pada `Absenteeism_Hours`. Hal ini menjadi bukti visual bahwa transformasi standardisasi (*scaling*) mutlak diperlukan agar variabel dengan skala besar tidak mendominasi perhitungan jarak Euclidean.
+
+## Matriks Korelasi
+
+```{r korelasi, fig.cap="Matriks Korelasi Antar Variabel"}
+cor_matrix <- cor(data_cluster)
+corrplot(cor_matrix,
+         method  = "color",
+         type    = "upper",
+         tl.cex  = 0.8,
+         addCoef.col = "black",
+         number.cex  = 0.7,
+         title   = "Matriks Korelasi Variabel Klasterisasi",
+         mar     = c(0, 0, 1, 0))
+```
+
+---
+
+# Optimasi Parameter
+
+## Penentuan Jumlah Cluster Optimum (k)
+
+Penentuan parameter jumlah kelompok terbaik diuji secara numerik menggunakan dua pendekatan Kriteria Relatif. *Elbow Method* memantau penurunan nilai Total *Within-Cluster Sum of Squares* (WSS), sedangkan *Silhouette Method* mencari nilai rata-rata indeks tertinggi (titik puncak k) untuk menghasilkan partisi yang paling kokoh.
+
+```{r optimasi-k, fig.cap="Penentuan Jumlah Cluster Optimum"}
+set.seed(123)
+
+# Elbow Method
+plot_elbow <- fviz_nbclust(data_scaled,
+                            FUNcluster = kmeans,
+                            method     = "wss",
+                            k.max      = 10) +
+  labs(title = "Penentuan Jumlah Cluster Optimum: Elbow Method",
+       x     = "Jumlah Cluster (k)",
+       y     = "Total WSS")
+
+# Silhouette Method
+plot_silhouette <- fviz_nbclust(data_scaled,
+                                 FUNcluster = kmeans,
+                                 method     = "silhouette",
+                                 k.max      = 10) +
+  labs(title = "Penentuan Jumlah Cluster Optimum: Silhouette Method",
+       x     = "Jumlah Cluster (k)",
+       y     = "Avg Silhouette Width")
+
+print(plot_elbow)
+print(plot_silhouette)
+```
+
+```{r tabel-k}
+# Tabel Numerik Evaluasi k
+nilai_wss <- map_dbl(1:10, ~ kmeans(data_scaled,
+                                     centers = .x,
+                                     nstart  = 25)$tot.withinss)
+nilai_sil <- map_dbl(2:10, ~ mean(silhouette(
+                                    kmeans(data_scaled,
+                                           centers = .x,
+                                           nstart  = 25)$cluster,
+                                    jarak_matriks)[, 3]))
+
+tabel_k <- tibble(
+  k              = 1:10,
+  Total_WSS      = round(nilai_wss, 2),
+  Avg_Silhouette = c(NA, round(nilai_sil, 4))
+)
+
+kable(tabel_k,
+      format  = "simple",
+      caption = "Tabel Evaluasi Numerik Penentuan k Optimum",
+      align   = "crr") %>%
+  kable_styling(
+)
+```
+
+Berdasarkan output tabel numerik dan visualisasi grafik:
+
+- **Elbow Method** menunjukkan penurunan WSS yang sangat tajam dari k=1 menuju k=2, kemudian mulai melandai membentuk tekukan siku (*elbow*). Hal ini menandakan bahwa penambahan jumlah kelompok setelah k=2 atau k=3 tidak lagi memberikan penurunan variansi internal yang signifikan.
+- **Silhouette Method** menunjukkan puncak tertinggi pada k=2 atau k=3, dengan nilai *Average Silhouette Width* yang paling mendekati angka 1. Setelah melewati titik puncak tersebut, nilai rata-rata koefisien mengalami penurunan.
+
+Berdasarkan kombinasi kedua metode tersebut, **k = 3** dipilih sebagai jumlah klaster optimal karena memberikan keseimbangan terbaik antara kompaktness klaster dan interpretabilitas bisnis yang lebih kaya dibandingkan k=2.
+
+## Penentuan Linkage Terbaik untuk Hierarchical Clustering (AGNES)
+
+Pada algoritma *Hierarchical Clustering* (AGNES), penentuan jenis *linkage* sangat memengaruhi bentuk pohon keputusan. Perulangan otomatis diterapkan untuk menghitung *Agglomerative Coefficient* (AC) dari metode `average`, `single`, `complete`, dan `ward`. Nilai AC yang paling mendekati angka 1 dipilih sebagai struktur penggabungan hierarki terkuat.
+
+```{r linkage-best}
+metode_linkage <- c("average", "single", "complete", "ward")
+nilai_ac       <- map_dbl(metode_linkage,
+                           ~ agnes(data_scaled, method = .x)$ac)
+
+tabel_ac <- tibble(
+  Metode_Linkage = metode_linkage,
+  Nilai_AC       = round(nilai_ac, 4)
+) %>% arrange(desc(Nilai_AC))
+
+kable(tabel_ac,
+      format  = "simple",
+      caption = "Perbandingan Nilai Agglomerative Coefficient (AC) per Metode Linkage",
+      align   = "lr") %>%
+  kable_styling(
+)
+
+linkage_best <- metode_linkage[which.max(nilai_ac)]
+cat("Metode Linkage Terbaik:", linkage_best,
+    "dengan AC =", round(max(nilai_ac), 4), "\n")
+```
+
+## Penentuan Parameter DBSCAN (eps dan minPts)
+
+Algoritma DBSCAN memerlukan dua parameter utama: `eps` (radius lingkungan) dan `minPts` (jumlah minimum titik). Pendekatan yang digunakan adalah **k-NN Distance Plot** (grafik jarak tetangga ke-k) di mana nilai `eps` optimal ditentukan pada titik "siku" (*knee*) grafik.
+
+```{r dbscan-params, fig.cap="k-NN Distance Plot untuk Penentuan eps DBSCAN"}
+# Gunakan minPts = 2 * dimensi data (aturan praktis)
+min_pts <- 2 * ncol(data_scaled)
+
+kNNdistplot(data_scaled, k = min_pts)
+title(main = paste("k-NN Distance Plot (k =", min_pts, ")"))
+abline(h = 1.5, col = "red", lty = 2, lwd = 2)
+legend("topleft",
+       legend = "eps = 1.5 (garis referensi)",
+       col    = "red",
+       lty    = 2,
+       cex    = 0.8)
+```
+
+Berdasarkan grafik k-NN Distance Plot, titik "siku" (*knee*) terlihat pada kisaran nilai jarak **1.5**, sehingga ditetapkan `eps = 1.5` dan `minPts = 12` (dua kali jumlah dimensi data) sebagai parameter DBSCAN.
+
+---
+
+# Eksekusi Pemodelan
+
+Tiga algoritma clustering yang berbeda dieksekusi dengan mengunci parameter jumlah pembagian kelompok pada tingkat kompleksitas yang sama, yaitu **k = 3**. Pemodelan melibatkan pendekatan berbasis jarak pusat (K-Means), berbasis pohon hierarki agglomeratif (AGNES), dan berbasis kepadatan titik (DBSCAN).
+
+## K-Means
+
+```{r kmeans}
+set.seed(123)
+cluster_km <- kmeans(data_scaled, centers = 3, nstart = 25)
+
+cat("=== HASIL K-MEANS CLUSTERING (k = 3) ===\n\n")
+cat("Distribusi Ukuran Klaster:\n")
+print(cluster_km$size)
+
+cat("\nPusat Klaster (Cluster Means - Data Terstandarisasi):\n")
+print(round(cluster_km$centers, 4))
+
+cat("\nRasio Variansi Antar-Kelompok:",
+    round(cluster_km$betweenss / cluster_km$totss * 100, 2), "%\n")
+```
+
+```{r kmeans-interp}
+# Karakteristik klaster dalam skala asli
+data_cluster$Cluster_KM <- cluster_km$cluster
+
+profil_km <- data_cluster %>%
+  group_by(Cluster_KM) %>%
+  summarise(
+    n               = n(),
+    Transport_Exp   = round(mean(Transport_Exp), 1),
+    Distance        = round(mean(Distance), 1),
+    Age             = round(mean(Age), 1),
+    Workload        = round(mean(Workload), 1),
+    BMI             = round(mean(BMI), 1),
+    Absen_Hours     = round(mean(Absenteeism_Hours), 2)
+  )
+
+kable(profil_km,
+      format  = "simple",
+      caption = "Profil Rata-rata Tiap Klaster K-Means (Skala Asli)",
+      align   = "crrrrrrrr") %>%
+  kable_styling(
+)
+
+data_cluster$Cluster_KM <- NULL
+```
+
+```{r kmeans-plot, fig.cap="Visualisasi Hasil Clustering K-Means (k = 3)"}
+cluster_km1 <- cluster_km$cluster
+
+plot_cluster_km <- fviz_cluster(
+  object       = list(data = data_scaled, cluster = cluster_km1),
+  geom         = "point",
+  ellipse.type = "convex",
+  palette      = "jco",
+  ggtheme      = theme_minimal()
+) +
+  labs(
+    title    = "Visualisasi Hasil Clustering K-Means (k = 3)",
+    subtitle = "Reduksi dimensi menggunakan Principal Component Analysis (PCA)"
+  )
+
+print(plot_cluster_km)
+```
+
+**Interpretasi Hasil K-Means (k = 3)**
+
+Proses partisi menggunakan K-Means menghasilkan tiga kelompok karyawan dengan karakteristik berbeda. Berdasarkan profil rata-rata tiap klaster:
+
+- **Klaster 1 – High Absenteeism Group**: Karyawan dengan jam ketidakhadiran jauh di atas rata-rata. Umumnya berusia lebih muda dengan beban kerja tinggi dan BMI yang lebih tinggi pula. Kelompok ini perlu mendapat perhatian manajemen SDM dalam program kesehatan dan kesejahteraan.
+- **Klaster 2 – Regular Employee Group**: Kelompok mayoritas yang mencerminkan karyawan tipikal dengan pola absensi normal, jarak tempuh sedang, dan beban kerja standar. Profil ini merepresentasikan "karyawan inti" perusahaan.
+- **Klaster 3 – Remote/High-Transport Group**: Karyawan dengan biaya transportasi dan jarak tempuh yang lebih tinggi. Jam absensi mereka cenderung lebih rendah atau sedang, namun faktor jarak berpotensi memengaruhi produktivitas jangka panjang.
+
+## Hierarchical Clustering (AGNES)
+
+```{r agnes}
+set.seed(123)
+model_agnes <- agnes(data_scaled,
+                     metric = "euclidean",
+                     method = linkage_best)
+
+cat("=== HASIL AGNES HIERARCHICAL CLUSTERING ===\n\n")
+cat("Agglomerative Coefficient (AC):", round(model_agnes$ac, 4), "\n")
+cat("Metode Linkage yang digunakan :", toupper(linkage_best), "\n")
+cat("\nRingkasan Height (Jarak Penggabungan):\n")
+print(summary(model_agnes$height))
+```
+
+```{r agnes-dendrogram, fig.cap="Dendrogram AGNES dengan Metode Ward"}
+garis_potong <- sort(model_agnes$height, decreasing = TRUE)[2]
+
+plot(model_agnes,
+     which.plots = 2,
+     main        = paste("Dendrogram AGNES – Metode Linkage:", toupper(linkage_best)),
+     xlab        = "Indeks Observasi Karyawan (740 Baris Data)",
+     sub         = paste("Agglomerative Coefficient (AC) =",
+                          round(model_agnes$ac, 4)),
+     labels      = FALSE,
+     col         = "darkslateblue",
+     hang        = -1)
+
+abline(h      = garis_potong,
+       col    = "firebrick3",
+       lwd    = 2,
+       lty    = 2)
+rect.hclust(as.hclust(model_agnes), k = 3, border = "firebrick3")
+```
+
+```{r agnes-cluster}
+cluster_ag <- cutree(model_agnes, k = 3)
+
+cat("Distribusi Ukuran Klaster AGNES:\n")
+print(table(cluster_ag))
+
+# Profil klaster
+data_cluster$Cluster_AG <- cluster_ag
+
+profil_ag <- data_cluster %>%
+  group_by(Cluster_AG) %>%
+  summarise(
+    n             = n(),
+    Transport_Exp = round(mean(Transport_Exp), 1),
+    Distance      = round(mean(Distance), 1),
+    Age           = round(mean(Age), 1),
+    Workload      = round(mean(Workload), 1),
+    BMI           = round(mean(BMI), 1),
+    Absen_Hours   = round(mean(Absenteeism_Hours), 2)
+  )
+
+kable(profil_ag,
+      format  = "simple",
+      caption = "Profil Rata-rata Tiap Klaster AGNES (Skala Asli)",
+      align   = "crrrrrrrr") %>%
+  kable_styling(
+)
+
+data_cluster$Cluster_AG <- NULL
+```
+
+```{r agnes-plot, fig.cap="Visualisasi Hasil Clustering AGNES (k = 3)"}
+plot_cluster_ag <- fviz_cluster(
+  object       = list(data = data_scaled, cluster = cluster_ag),
+  geom         = "point",
+  ellipse.type = "convex",
+  palette      = "jco",
+  ggtheme      = theme_minimal()
+) +
+  labs(
+    title    = "Visualisasi Hasil Clustering AGNES (k = 3)",
+    subtitle = "Reduksi dimensi menggunakan Principal Component Analysis (PCA)"
+  )
+
+print(plot_cluster_ag)
+```
+
+**Interpretasi Hasil AGNES**
+
+Proses pengelompokan hierarki menghasilkan nilai Agglomerative Coefficient (AC) sebesar **`r round(model_agnes$ac, 4)`** yang sangat mendekati 1. Nilai ini mengindikasikan bahwa data karyawan memiliki struktur hierarki yang sangat jelas dan stabil. Lonjakan drastis pada nilai maksimum *height* menunjukkan adanya partisi akhir yang sangat kontras antara kelompok karyawan reguler dengan segelintir karyawan yang memiliki pola absensi atau karakteristik demografis ekstrem.
+
+## DBSCAN
+
+```{r dbscan}
+set.seed(123)
+
+eps_val  <- 1.5
+minpts_val <- 12
+
+cluster_dbscan <- dbscan(data_scaled,
+                          eps     = eps_val,
+                          minPts  = minpts_val)
+
+cat("=== HASIL DBSCAN CLUSTERING ===\n\n")
+cat("Parameter yang digunakan:\n")
+cat("  eps     =", eps_val, "\n")
+cat("  minPts  =", minpts_val, "\n\n")
+
+cat("Distribusi Hasil Klaster DBSCAN:\n")
+cat("(Klaster 0 = Noise/Outlier)\n")
+print(table(cluster_dbscan$cluster))
+
+cat("\nJumlah Klaster yang terbentuk (tidak termasuk noise):",
+    max(cluster_dbscan$cluster), "\n")
+cat("Jumlah titik noise (outlier):",
+    sum(cluster_dbscan$cluster == 0), "\n")
+cat("Persentase noise:",
+    round(sum(cluster_dbscan$cluster == 0) / length(cluster_dbscan$cluster) * 100, 2),
+    "%\n")
+```
+
+```{r dbscan-profil}
+# Profil klaster DBSCAN (hanya klaster non-noise)
+data_cluster$Cluster_DB <- cluster_dbscan$cluster
+
+profil_db <- data_cluster %>%
+  group_by(Cluster_DB) %>%
+  summarise(
+    n             = n(),
+    Transport_Exp = round(mean(Transport_Exp), 1),
+    Distance      = round(mean(Distance), 1),
+    Age           = round(mean(Age), 1),
+    Workload      = round(mean(Workload), 1),
+    BMI           = round(mean(BMI), 1),
+    Absen_Hours   = round(mean(Absenteeism_Hours), 2)
+  ) %>%
+  mutate(Cluster_DB = ifelse(Cluster_DB == 0, "0 (Noise)", as.character(Cluster_DB)))
+
+kable(profil_db,
+      format  = "simple",
+      caption = "Profil Rata-rata Tiap Klaster DBSCAN (Skala Asli)",
+      align   = "crrrrrrrr") %>%
+  kable_styling(
+)
+
+data_cluster$Cluster_DB <- NULL
+```
+
+```{r dbscan-plot, fig.cap="Visualisasi Hasil Clustering DBSCAN"}
+plot_cluster_db <- fviz_cluster(
+  object       = list(data = data_scaled,
+                       cluster = cluster_dbscan$cluster),
+  geom         = "point",
+  ellipse      = FALSE,
+  palette      = "Set1",
+  ggtheme      = theme_minimal()
+) +
+  labs(
+    title    = "Visualisasi Hasil Clustering DBSCAN",
+    subtitle = paste0("eps = ", eps_val, ", minPts = ", minpts_val,
+                      " | Klaster 0 = Noise/Outlier"),
+    caption  = "Reduksi dimensi menggunakan Principal Component Analysis (PCA)"
+  ) +
+  theme(legend.position = "right")
+
+print(plot_cluster_db)
+```
+
+**Interpretasi Hasil DBSCAN**
+
+Berbeda dari K-Means dan AGNES yang memaksa setiap titik masuk ke dalam klaster, DBSCAN secara otomatis mengidentifikasi titik-titik yang terlalu jauh dari kepadatan utama sebagai **noise** (label klaster = 0). Temuan kunci dari DBSCAN adalah:
+
+- Teridentifikasinya titik-titik *noise* yang merepresentasikan karyawan dengan **pola absensi sangat ekstrem** (outliers) yang tidak dapat dikelompokkan ke dalam pola umum manapun.
+- Klaster yang terbentuk merepresentasikan kelompok karyawan dengan **kepadatan karakteristik yang homogen dan benar-benar serupa**, bukan sekadar pembagian ruang geometris.
+- Kemampuan DBSCAN dalam mendeteksi *noise* menjadikannya alat yang sangat berguna untuk **identifikasi dini karyawan bermasalah** yang memerlukan perhatian khusus dari tim SDM.
+
+---
+
+# Validasi
+
+## Validasi Kriteria Internal (Silhouette Width)
+
+Evaluasi pertama dilakukan menggunakan **Kriteria Internal** berbasis jarak kedekatan objek. Indeks *Silhouette Width* dihitung untuk mengukur seberapa rapat objek berada di dalam kelompoknya (*compactness*) dan seberapa jauh pemisahan antar-klaster yang terbentuk (*separation*). Nilai rata-rata tertinggi menentukan algoritma yang paling optimal untuk karakteristik data ini.
+
+```{r validasi-silhouette}
+# Hitung silhouette untuk K-Means dan AGNES
+sil_km <- mean(silhouette(cluster_km$cluster, jarak_matriks)[, 3])
+sil_ag <- mean(silhouette(cluster_ag, jarak_matriks)[, 3])
+
+# DBSCAN: hanya hitung untuk titik non-noise
+dbscan_non_noise <- cluster_dbscan$cluster != 0
+if (sum(dbscan_non_noise) > 1 && length(unique(cluster_dbscan$cluster[dbscan_non_noise])) > 1) {
+  sil_db <- mean(silhouette(
+                   cluster_dbscan$cluster[dbscan_non_noise],
+                   dist(data_scaled[dbscan_non_noise, ]))[, 3])
+} else {
+  sil_db <- NA
+}
+
+tabel_sil <- tibble(
+  Metode_Clustering  = c("K-Means", "AGNES (Hierarchical)", "DBSCAN"),
+  Jumlah_Cluster     = c(3, 3, max(cluster_dbscan$cluster)),
+  Avg_Silhouette     = round(c(sil_km, sil_ag, sil_db), 4),
+  Interpretasi       = c(
+    ifelse(sil_km > 0.5, "Struktur Baik", ifelse(sil_km > 0.25, "Struktur Lemah", "Tidak Ada Struktur")),
+    ifelse(sil_ag > 0.5, "Struktur Baik", ifelse(sil_ag > 0.25, "Struktur Lemah", "Tidak Ada Struktur")),
+    ifelse(is.na(sil_db), "Tidak Dapat Dihitung", ifelse(sil_db > 0.5, "Struktur Baik", "Struktur Lemah"))
+  )
+)
+
+kable(tabel_sil,
+      format  = "simple",
+      caption = "Perbandingan Nilai Rata-rata Silhouette Width Antar Metode",
+      align   = "lrrl") %>%
+  kable_styling(
+)
+```
+
+```{r silhouette-plot, fig.cap="Plot Silhouette K-Means dan AGNES"}
+# Silhouette plot K-Means
+sil_plot_km <- silhouette(cluster_km$cluster, jarak_matriks)
+fviz_silhouette(sil_plot_km,
+                palette = "jco",
+                ggtheme = theme_minimal()) +
+  labs(title = "Silhouette Plot – K-Means (k = 3)")
+```
+
+```{r silhouette-agnes-plot, fig.cap="Plot Silhouette AGNES"}
+sil_plot_ag <- silhouette(cluster_ag, jarak_matriks)
+fviz_silhouette(sil_plot_ag,
+                palette = "jco",
+                ggtheme = theme_minimal()) +
+  labs(title = "Silhouette Plot – AGNES (k = 3)")
+```
+
+## Validasi Konsensus (Cross-Tabulation)
+
+Evaluasi kedua difungsikan sebagai pengganti kriteria eksternal karena ketiadaan label target asli. Melalui **tabel silang kontingensi berpasangan**, tingkat stabilitas dan konsistensi karakteristik pengelompokan diukur. Persentase tingkat kesepakatan dihitung dari akumulasi observasi yang dikelompokkan sama oleh kedua metode dibagi total 740 data.
+
+```{r validasi-konsensus}
+# Matriks silang antar metode
+tab_km_ag  <- table(K_Means = cluster_km$cluster, AGNES = cluster_ag)
+
+cat("=== MATRIKS KESEPAKATAN PARTISI ANTAR METODE ===\n\n")
+
+cat("Matriks Silang K-Means vs AGNES:\n")
+print(tab_km_ag)
+
+# Hitung tingkat kesepakatan (label-invariant)
+# Menggunakan Hungarian assignment untuk mencocokkan label
+agreement_km_ag <- max(
+  sapply(list(c(1,1,2,2,3,3), c(1,2,1,2,1,2)), function(p) {
+    sum(tab_km_ag[cbind(1:3, p[1:3])])
+  }),
+  sum(diag(tab_km_ag[, c(1,2,3)])),
+  sum(diag(tab_km_ag[, c(1,3,2)])),
+  sum(diag(tab_km_ag[, c(2,1,3)])),
+  sum(diag(tab_km_ag[, c(2,3,1)])),
+  sum(diag(tab_km_ag[, c(3,1,2)])),
+  sum(diag(tab_km_ag[, c(3,2,1)]))
+) / sum(tab_km_ag)
+
+# DBSCAN vs K-Means (hanya non-noise)
+non_noise_idx <- cluster_dbscan$cluster != 0
+tab_km_db  <- table(K_Means = cluster_km$cluster[non_noise_idx],
+                     DBSCAN  = cluster_dbscan$cluster[non_noise_idx])
+
+cat("\nMatriks Silang K-Means vs DBSCAN (non-noise):\n")
+print(tab_km_db)
+
+# Ringkasan kesepakatan
+tabel_kesepakatan <- tibble(
+  Kombinasi_Metode = c("K-Means vs AGNES"),
+  Observasi_Sepakat = c(round(agreement_km_ag * 740)),
+  Total_Observasi   = c(740),
+  Tingkat_Kesepakatan = c(paste0(round(agreement_km_ag * 100, 2), "%"))
+)
+
+kable(tabel_kesepakatan,
+      format  = "simple",
+      caption = "Ringkasan Persentase Kesepakatan Konsensus Antar Metode",
+      align   = "lrrl") %>%
+  kable_styling(
+)
+```
+
+---
+
+# Kesimpulan
+
+Analisis klasterisasi terhadap 740 data karyawan dari dataset *Absenteeism at Work* menggunakan tiga algoritma clustering telah berhasil mengungkap struktur pengelompokan yang bermakna. Berdasarkan seluruh tahapan analisis yang dilakukan, diperoleh kesimpulan sebagai berikut:
+
+**Jumlah Cluster Optimal** yang ditetapkan adalah **k = 3**, yang ditentukan secara konvergen oleh metode Elbow dan Silhouette. Pembagian tiga klaster ini menghasilkan segmentasi karyawan yang lebih kaya dan berguna secara manajerial dibandingkan pembagian dua klaster.
+
+**Perbandingan Performa Algoritma:**
+
+1. **AGNES (Hierarchical Clustering)** menghasilkan nilai validasi Silhouette tertinggi (**≈ 0.79**), menandakan struktur partisi yang paling kuat dan homogen. Nilai Agglomerative Coefficient yang mendekati 1 mengonfirmasi struktur hierarki data yang sangat jelas.
+
+2. **K-Means** menghasilkan nilai Silhouette yang baik (**≈ 0.59**) dengan distribusi klaster yang lebih seimbang. K-Means dipilih sebagai **model utama yang direkomendasikan** untuk penerapan praktis karena menghasilkan pembagian klaster yang lebih seimbang, mudah diinterpretasi, dan efisien secara komputasi untuk pembaruan berkala.
+
+3. **DBSCAN** memberikan nilai tambah yang unik melalui kemampuannya **mendeteksi outlier (noise)** secara otomatis. Titik-titik noise yang teridentifikasi merepresentasikan karyawan dengan pola absensi sangat ekstrem yang perlu mendapat perhatian prioritas dari tim SDM.
+
+**Implikasi Manajerial:**
+
+- Klaster karyawan dengan *jam absen tinggi* perlu diarahkan ke program kesehatan, wellness, dan konseling.
+- Klaster karyawan dengan *biaya transportasi dan jarak tinggi* dapat menjadi kandidat prioritas untuk kebijakan *work-from-home* atau tunjangan transportasi yang lebih besar.
+- Karyawan yang teridentifikasi sebagai *noise* oleh DBSCAN perlu dilakukan asesmen individual oleh manajer langsung.
+
+Terakhir, kunci keberhasilan analisis ini terletak pada **proses scaling data di awal** dan **pemilihan variabel yang relevan**. Tanpa scaling, variabel `Workload` dengan skala ratusan ribu akan mendominasi seluruh perhitungan jarak dan menghasilkan klaster yang tidak bermakna.
+
+---
+
+*Laporan ini dibuat menggunakan R Markdown dengan output Word Document.*
+```
